@@ -1,0 +1,5 @@
+*.ipk
+*.apk
+*.bak
+.DS_Store
+.editor/
