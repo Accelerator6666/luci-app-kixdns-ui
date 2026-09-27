@@ -451,4 +451,157 @@ method_list_backups() {
 method_restore_backup() {
 	local name backup
 	name="$(arg_get name)"
-	case "$na
+	case "$name" in
+		pipeline.json.*.bak) ;;
+		*) json_reply_error "Invalid backup name"; return ;;
+	esac
+	case "$name" in */*) json_reply_error "Invalid backup name"; return ;; esac
+	backup="$BACKUP_DIR/$name"
+	[ -f "$backup" ] || { json_reply_error "Backup not found"; return; }
+	# Save the current file first so a restore is itself reversible.
+	make_backup || { json_reply_error "Unable to back up current configuration"; return; }
+	if rollback_to "$backup"; then
+		json_init
+		json_add_boolean ok 1
+		json_add_string message "Backup restored and KixDNS restarted"
+		json_add_string backup "$backup"
+		json_add_string previous_backup "$BACKUP_CREATED"
+		json_dump
+	else
+		json_reply_error "Backup restore failed"
+	fi
+}
+
+method_diff_backup() {
+	local name backup out rc
+	name="$(arg_get name)"
+	case "$name" in pipeline.json.*.bak) ;; *) json_reply_error "Invalid backup name"; return ;; esac
+	case "$name" in */*) json_reply_error "Invalid backup name"; return ;; esac
+	backup="$BACKUP_DIR/$name"
+	[ -f "$backup" ] || { json_reply_error "Backup not found"; return; }
+	if ! command -v diff >/dev/null 2>&1; then
+		json_reply_error "diff utility is not available on this router"
+		return
+	fi
+	out="$(diff -u "$backup" "$CFG" 2>&1 | head -400)"
+	rc=$?
+	# diff returns 1 when files differ; that is a successful comparison.
+	[ "$rc" -le 1 ] || { json_reply_error "diff failed"; return; }
+	json_init
+	json_add_boolean ok 1
+	json_add_boolean identical "$([ -z "$out" ] && echo 1 || echo 0)"
+	json_add_string output "$out"
+	json_dump
+}
+
+method_sync_editor() {
+	local tmp bytes hash now
+	mkdir -p "$EDITOR_DIR" /etc/kixdns || { json_reply_error "Unable to create editor directory"; return; }
+	tmp="$EDITOR_DIR/.config_editor.html.$$"
+	rm -f "$tmp"
+	if ! fetch_editor "$tmp"; then
+		rm -f "$tmp"
+		json_reply_error "Unable to download the official KixDNS editor from GitHub. Check router HTTPS/DNS/proxy connectivity."
+		return
+	fi
+	if ! validate_editor_file "$tmp"; then
+		rm -f "$tmp"
+		json_reply_error "Downloaded file did not pass the KixDNS editor sanity checks"
+		return
+	fi
+	[ ! -f "$EDITOR_FILE" ] || cp -f "$EDITOR_FILE" "$EDITOR_FILE.bak" 2>/dev/null || true
+	chmod 644 "$tmp" 2>/dev/null || true
+	mv -f "$tmp" "$EDITOR_FILE" || { rm -f "$tmp"; json_reply_error "Unable to install downloaded editor"; return; }
+	bytes="$(wc -c < "$EDITOR_FILE")"
+	hash="$(editor_hash)"
+	now="$(date '+%Y-%m-%d %H:%M:%S %z')"
+	umask 077
+	{
+		echo "updated=$now"
+		echo "sha256=$hash"
+		echo "source=$EDITOR_URL"
+	} > "$EDITOR_META"
+	json_init
+	json_add_boolean ok 1
+	json_add_string message "Official KixDNS config editor downloaded and installed"
+	json_add_int editor_size "${bytes:-0}"
+	json_add_string editor_sha256 "$hash"
+	json_add_string editor_updated "$now"
+	json_dump
+}
+
+method_editor_status() {
+	json_init
+	json_add_boolean ok 1
+	editor_status_json
+	json_dump
+}
+
+method_diagnose() {
+	local domain qtype output rc bind parsed host port
+	domain="$(arg_get domain)"
+	qtype="$(arg_get qtype)"
+	case "$qtype" in A|AAAA|CNAME|MX|TXT|NS|PTR|SOA|SRV) ;; *) qtype="A" ;; esac
+	case "$domain" in
+		''|*[!A-Za-z0-9._:-]*) json_reply_error "Invalid domain"; return ;;
+	esac
+	command -v drill >/dev/null 2>&1 || { json_reply_error "drill is not installed"; return; }
+	bind="$(config_bind_udp)"
+	[ -n "$bind" ] || bind="127.0.0.1:5353"
+	parsed="$(parse_bind "$bind")"
+	host="$(printf '%s' "$parsed" | cut -f1)"
+	port="$(printf '%s' "$parsed" | cut -f2)"
+	output="$(timeout 8 drill -p "$port" @"$host" "$domain" "$qtype" 2>&1)"
+	rc=$?
+	json_init
+	json_add_boolean ok "$([ "$rc" -eq 0 ] && echo 1 || echo 0)"
+	json_add_int rc "$rc"
+	json_add_string server "$host:$port"
+	json_add_string output "$output"
+	json_dump
+}
+
+method_self_check() {
+	local ok=1 report cn foreign bind parsed host port geoip geosite path ext
+	report=""
+
+	if kix_running; then report="${report}[PASS] kixdns process running\n"; else report="${report}[FAIL] kixdns process not running\n"; ok=0; fi
+	if config_valid_file "$CFG"; then report="${report}[PASS] pipeline.json is valid JSON\n"; else report="${report}[FAIL] pipeline.json invalid or missing\n"; ok=0; fi
+	if listener_ok; then report="${report}[PASS] configured KixDNS listener is active\n"; else report="${report}[FAIL] configured listener is not active\n"; ok=0; fi
+
+	geoip="$(config_value "$CFG" '@.settings.geoip_dat_path')"
+	if [ -n "$geoip" ]; then
+		if [ -f "$geoip" ]; then report="${report}[PASS] GeoIP data exists: $geoip\n"; else report="${report}[FAIL] GeoIP data missing: $geoip\n"; ok=0; fi
+	fi
+	geosite="$(config_value "$CFG" '@.settings.geosite_data_paths[@]')"
+	for path in $geosite; do
+		if [ -f "$path" ]; then report="${report}[PASS] GeoSite data exists: $path\n"; else report="${report}[FAIL] GeoSite data missing: $path\n"; ok=0; fi
+	done
+
+	if command -v drill >/dev/null 2>&1; then
+		bind="$(config_bind_udp)"; [ -n "$bind" ] || bind="127.0.0.1:5353"
+		parsed="$(parse_bind "$bind")"; host="$(printf '%s' "$parsed" | cut -f1)"; port="$(printf '%s' "$parsed" | cut -f2)"
+		cn="$(timeout 8 drill -p "$port" @"$host" www.baidu.com A 2>/dev/null)"
+		if echo "$cn" | grep -q 'rcode:' && ! echo "$cn" | grep -q 'rcode: SERVFAIL'; then report="${report}[PASS] CN DNS query\n"; else report="${report}[FAIL] CN DNS query\n"; ok=0; fi
+		foreign="$(timeout 8 drill -p "$port" @"$host" github.com A 2>/dev/null)"
+		if echo "$foreign" | grep -q 'rcode:' && ! echo "$foreign" | grep -q 'rcode: SERVFAIL'; then report="${report}[PASS] foreign DNS query\n"; else report="${report}[FAIL] foreign DNS query\n"; ok=0; fi
+	else
+		report="${report}[WARN] drill is not installed; DNS query checks skipped\n"
+	fi
+
+	if [ -x /usr/bin/dae-kixdns-check ]; then
+		ext="$(timeout 25 /usr/bin/dae-kixdns-check 2>&1 | tail -80)"
+		report="${report}\n===== dae-kixdns-check =====\n${ext}\n"
+	fi
+
+	json_init
+	json_add_boolean ok "$ok"
+	json_add_string report "$(printf '%b' "$report")"
+	json_dump
+}
+
+method_get_log() {
+	local limit out
+	limit="$(arg_get limit)"
+	case "$limit" in ''|*[!0-9]*) limit=120 ;; esac
+	
