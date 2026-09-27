@@ -1,0 +1,241 @@
+#!/bin/ash
+
+# SPDX-License-Identifier: GPL-3.0-only
+# rpcd backend for luci-app-kixdns-ui
+
+. /usr/share/libubox/jshn.sh
+
+CFG="/etc/kixdns/pipeline.json"
+BACKUP_DIR="/etc/kixdns/backups"
+INIT="/etc/init.d/kixdns"
+BIN="/usr/bin/kixdns"
+LOG="/tmp/kixdns.log"
+EDITOR_DIR="/www/kixdns-editor"
+EDITOR_FILE="$EDITOR_DIR/config_editor.html"
+EDITOR_META="/etc/kixdns/editor.meta"
+EDITOR_URL="https://raw.githubusercontent.com/olicesx/kixdns/main/tools/config_editor.html"
+MAX_CONFIG_BYTES=524288
+MAX_EDITOR_BYTES=524288
+
+json_reply_error() {
+	json_init
+	json_add_boolean ok 0
+	json_add_string error "$1"
+	json_dump
+}
+
+json_reply_ok() {
+	json_init
+	json_add_boolean ok 1
+	[ -n "$1" ] && json_add_string message "$1"
+	json_dump
+}
+
+read_input() {
+	INPUT="$(cat)"
+}
+
+arg_get() {
+	jsonfilter -s "$INPUT" -e "@.$1" 2>/dev/null
+}
+
+config_valid_file() {
+	[ -s "$1" ] && jsonfilter -i "$1" -e '@' >/dev/null 2>&1
+}
+
+kix_running() {
+	pidof kixdns >/dev/null 2>&1
+}
+
+kix_pid() {
+	pidof kixdns 2>/dev/null | awk '{print $1}'
+}
+
+config_value() {
+	local file="$1" expr="$2"
+	jsonfilter -i "$file" -e "$expr" 2>/dev/null
+}
+
+config_bind_udp() {
+	config_value "$CFG" '@.settings.bind_udp'
+}
+
+config_bind_tcp() {
+	config_value "$CFG" '@.settings.bind_tcp'
+}
+
+listener_ok() {
+	local udp tcp dump
+	udp="$(config_bind_udp)"
+	tcp="$(config_bind_tcp)"
+	dump="$(busybox netstat -lnptu 2>/dev/null)"
+
+	if [ -n "$udp" ] && echo "$dump" | grep -F "$udp" | grep -q 'udp'; then
+		return 0
+	fi
+
+	if [ -n "$tcp" ] && echo "$dump" | grep -F "$tcp" | grep -q 'tcp'; then
+		return 0
+	fi
+
+	return 1
+}
+
+parse_bind() {
+	# Prints: host<TAB>port. SocketAddr-style [::1]:5353 is supported.
+	local bind="$1" host port
+	case "$bind" in
+		[*]:*)
+			host="${bind#\[}"
+			host="${host%\]:*}"
+			port="${bind##*:}"
+			;;
+		*:*)
+			host="${bind%:*}"
+			port="${bind##*:}"
+			;;
+		*)
+			host="127.0.0.1"
+			port="5353"
+			;;
+	esac
+	case "$host" in
+		''|0.0.0.0) host="127.0.0.1" ;;
+		'::') host="::1" ;;
+	esac
+	printf '%s	%s
+' "$host" "$port"
+}
+
+health_dns() {
+	command -v drill >/dev/null 2>&1 || return 0
+	local bind parsed host port out rc
+	bind="$(config_bind_udp)"
+	[ -n "$bind" ] || bind="127.0.0.1:5353"
+	parsed="$(parse_bind "$bind")"
+	host="$(printf '%s' "$parsed" | cut -f1)"
+	port="$(printf '%s' "$parsed" | cut -f2)"
+	case "$port" in ''|*[!0-9]*) return 1 ;; esac
+	out="$(timeout 6 drill -p "$port" @"$host" example.com A 2>&1)"
+	rc=$?
+	[ "$rc" -eq 0 ] && echo "$out" | grep -q 'rcode:'
+}
+
+latest_backup() {
+	ls -1t "$BACKUP_DIR"/pipeline.json.*.bak 2>/dev/null | head -1
+}
+
+make_backup() {
+	BACKUP_CREATED=""
+	[ -f "$CFG" ] || return 0
+	mkdir -p "$BACKUP_DIR" || return 1
+	local stamp
+	stamp="$(date +%Y%m%d-%H%M%S)"
+	BACKUP_CREATED="$BACKUP_DIR/pipeline.json.$stamp.bak"
+	cp -p "$CFG" "$BACKUP_CREATED" || return 1
+	chmod 600 "$BACKUP_CREATED" 2>/dev/null || true
+}
+
+prepare_config_tmp() {
+	local content="$1" tmp bytes
+	[ -n "$content" ] || return 2
+	bytes="$(printf '%s' "$content" | wc -c)"
+	[ "$bytes" -le "$MAX_CONFIG_BYTES" ] || return 3
+
+	mkdir -p /etc/kixdns || return 4
+	tmp="${CFG}.new.$$"
+	umask 077
+	printf '%s
+' "$content" > "$tmp" || return 5
+	if ! config_valid_file "$tmp"; then
+		rm -f "$tmp"
+		return 6
+	fi
+	PREPARED_TMP="$tmp"
+	return 0
+}
+
+install_prepared_config() {
+	local tmp="$1"
+	make_backup || return 7
+	chmod 600 "$tmp" 2>/dev/null || true
+	mv -f "$tmp" "$CFG" || return 8
+	return 0
+}
+
+restart_field_changes() {
+	# KixDNS upstream documents these as listener / connection-pool / cache /
+	# engine-construction settings that are created at process startup.
+	local old="$1" new="$2" field before after changed=""
+	for field in 		bind_udp bind_tcp bind_doh doh_tls_cert doh_tls_key doh_path 		udp_pool_size tcp_pool_size doh_pool_size dot_pool_size doq_pool_size 		tcp_health_check_error_threshold tcp_connection_max_age_seconds 		tcp_connection_idle_timeout_seconds doq_connection_idle_timeout_seconds 		doq_keepalive_interval_ms doq_enable_0rtt 		flow_control_enabled flow_control_initial_permits flow_control_min_permits 		flow_control_max_permits flow_control_latency_threshold_ms 		flow_control_adjustment_interval_secs 		cache_capacity cache_max_ttl dashmap_shards geoip_db_path
+	do
+		before="$(config_value "$old" "@.settings.$field")"
+		after="$(config_value "$new" "@.settings.$field")"
+		if [ "$before" != "$after" ]; then
+			changed="${changed}${changed:+, }$field"
+		fi
+	done
+	printf '%s' "$changed"
+}
+
+restart_and_verify() {
+	[ -x "$INIT" ] || return 10
+	"$INIT" restart >/dev/null 2>&1 || true
+	sleep 2
+	kix_running || return 11
+	listener_ok || return 12
+	health_dns || return 13
+	return 0
+}
+
+hot_reload_and_verify() {
+	local before_pid="$1" after_pid
+	sleep 2
+	kix_running || return 21
+	after_pid="$(kix_pid)"
+	# Hot reload should not require process replacement. A changed PID is not
+	# fatal, but it is surfaced to the caller as a restart-like event.
+	listener_ok || return 22
+	health_dns || return 23
+	[ -z "$before_pid" ] || [ "$before_pid" = "$after_pid" ] || return 24
+	return 0
+}
+
+rollback_to() {
+	local backup="$1"
+	[ -n "$backup" ] && [ -f "$backup" ] || return 1
+	cp -f "$backup" "$CFG" || return 1
+	chmod 600 "$CFG" 2>/dev/null || true
+	[ -x "$INIT" ] || return 1
+	"$INIT" restart >/dev/null 2>&1 || true
+	sleep 2
+	kix_running && listener_ok && health_dns
+}
+
+editor_hash() {
+	[ -s "$EDITOR_FILE" ] || return 0
+	sha256sum "$EDITOR_FILE" 2>/dev/null | awk '{print $1}'
+}
+
+editor_updated() {
+	[ -f "$EDITOR_META" ] || return 0
+	sed -n 's/^updated=//p' "$EDITOR_META" | head -1
+}
+
+editor_status_json() {
+	local installed=0 size=0 hash="" updated=""
+	if [ -s "$EDITOR_FILE" ]; then
+		installed=1
+		size="$(wc -c < "$EDITOR_FILE")"
+		hash="$(editor_hash)"
+		updated="$(editor_updated)"
+	fi
+	json_add_boolean editor_installed "$installed"
+	json_add_int editor_size "${size:-0}"
+	json_add_string editor_sha256 "$hash"
+	json_add_string editor_updated "$updated"
+	json_add_string editor_url "$EDITOR_URL"
+	json_add_string editor_path "/kixdns-editor/config_editor.html"
+}
+
+fetch_edi
