@@ -1,0 +1,33 @@
+{
+  "admin/services/kixdns": {
+    "title": "KixDNS",
+    "order": 65,
+    "action": { "type": "firstchild" },
+    "depends": { "acl": [ "luci-app-kixdns-ui" ] }
+  },
+  "admin/services/kixdns/status": {
+    "title": "Overview",
+    "order": 10,
+    "action": { "type": "view", "path": "kixdns/status" }
+  },
+  "admin/services/kixdns/editor": {
+    "title": "Visual Editor",
+    "order": 20,
+    "action": { "type": "view", "path": "kixdns/editor" }
+  },
+  "admin/services/kixdns/config": {
+    "title": "Raw JSON",
+    "order": 30,
+    "action": { "type": "view", "path": "kixdns/config" }
+  },
+  "admin/services/kixdns/backups": {
+    "title": "Backups",
+    "order": 40,
+    "action": { "type": "view", "path": "kixdns/backups" }
+  },
+  "admin/services/kixdns/diagnostics": {
+    "title": "Diagnostics",
+    "order": 50,
+    "action": { "type": "view", "path": "kixdns/diagnostics" }
+  }
+}

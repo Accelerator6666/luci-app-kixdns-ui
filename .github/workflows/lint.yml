@@ -1,0 +1,29 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: JSON syntax
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          for p in pathlib.Path('root/usr/share').rglob('*.json'):
+              json.loads(p.read_text())
+              print('OK', p)
+          PY
+      - name: Shell syntax
+        run: |
+          sh -n install-dev.sh
+          sh -n uninstall-dev.sh
+          sh -n root/usr/libexec/rpcd/luci.kixdns
+      - name: JavaScript syntax
+        run: |
+          for f in htdocs/luci-static/resources/view/kixdns/*.js; do
+            node --check "$f"
+          done
