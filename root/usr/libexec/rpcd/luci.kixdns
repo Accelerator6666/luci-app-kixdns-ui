@@ -604,4 +604,59 @@ method_get_log() {
 	local limit out
 	limit="$(arg_get limit)"
 	case "$limit" in ''|*[!0-9]*) limit=120 ;; esac
-	
+	[ "$limit" -lt 20 ] && limit=20
+	[ "$limit" -gt 500 ] && limit=500
+	if [ -s "$LOG" ]; then
+		out="$(tail -n "$limit" "$LOG" 2>/dev/null)"
+	else
+		out="$(logread 2>/dev/null | grep -i kixdns | tail -n "$limit")"
+	fi
+	json_init
+	json_add_boolean ok 1
+	json_add_string output "$out"
+	json_dump
+}
+
+case "$1" in
+	list)
+		cat <<'JSON'
+{
+  "status": {},
+  "service": { "action": "" },
+  "get_config": {},
+  "save_config": { "content": "" },
+  "apply_config": { "content": "" },
+  "restore_last": {},
+  "list_backups": {},
+  "restore_backup": { "name": "" },
+  "diff_backup": { "name": "" },
+  "sync_editor": {},
+  "editor_status": {},
+  "diagnose": { "domain": "", "qtype": "A" },
+  "self_check": {},
+  "get_log": { "limit": 120 }
+}
+JSON
+		;;
+	call)
+		read_input
+		case "$2" in
+			status) method_status ;;
+			service) method_service ;;
+			get_config) method_get_config ;;
+			save_config) method_save_config ;;
+			apply_config) method_apply_config ;;
+			restore_last) method_restore_last ;;
+			list_backups) method_list_backups ;;
+			restore_backup) method_restore_backup ;;
+			diff_backup) method_diff_backup ;;
+			sync_editor) method_sync_editor ;;
+			editor_status) method_editor_status ;;
+			diagnose) method_diagnose ;;
+			self_check) method_self_check ;;
+			get_log) method_get_log ;;
+			*) json_reply_error "Unknown method" ;;
+		esac
+		;;
+	*) exit 1 ;;
+esac
