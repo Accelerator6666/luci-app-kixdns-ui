@@ -245,4 +245,217 @@ editor_status_json() {
 	json_add_string editor_path "/kixdns-editor/config_editor.html"
 }
 
-fetch_edi
+fetch_editor() {
+	local tmp="$1"
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -T 30 -O "$tmp" "$EDITOR_URL"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q -T 30 -O "$tmp" "$EDITOR_URL"
+	else
+		return 31
+	fi
+}
+
+validate_editor_file() {
+	local file="$1" bytes
+	[ -s "$file" ] || return 1
+	bytes="$(wc -c < "$file")"
+	[ "$bytes" -ge 50000 ] && [ "$bytes" -le "$MAX_EDITOR_BYTES" ] || return 1
+	grep -Fq '<title>KixDNS 配置编辑器</title>' "$file" || return 1
+	grep -Fq 'createApp' "$file" || return 1
+	grep -Fq 'v-model="rawJson"' "$file" || return 1
+	return 0
+}
+
+method_status() {
+	local pid running enabled version listener last cfgvalid bindudp bindtcp
+	pid="$(kix_pid)"
+	if [ -n "$pid" ]; then running=1; else running=0; fi
+	if [ -x "$INIT" ] && "$INIT" enabled >/dev/null 2>&1; then enabled=1; else enabled=0; fi
+	version=""
+	if [ -x "$BIN" ]; then
+		version="$($BIN --version 2>/dev/null | head -1)"
+		[ -n "$version" ] || version="$($BIN version 2>/dev/null | head -1)"
+	fi
+	listener="$(busybox netstat -lnptu 2>/dev/null | grep -E 'kixdns|127\.0\.0\.1:|0\.0\.0\.0:' | head -12)"
+	last="$(latest_backup)"
+	if config_valid_file "$CFG"; then cfgvalid=1; else cfgvalid=0; fi
+	bindudp="$(config_bind_udp)"
+	bindtcp="$(config_bind_tcp)"
+
+	json_init
+	json_add_boolean ok 1
+	json_add_boolean running "$running"
+	json_add_boolean enabled "$enabled"
+	json_add_int pid "${pid:-0}"
+	json_add_string version "$version"
+	json_add_string config_path "$CFG"
+	json_add_boolean config_valid "$cfgvalid"
+	json_add_string bind_udp "$bindudp"
+	json_add_string bind_tcp "$bindtcp"
+	json_add_string listener "$listener"
+	json_add_string last_backup "$last"
+	json_add_boolean binary_exists "$([ -x "$BIN" ] && echo 1 || echo 0)"
+	editor_status_json
+	json_dump
+}
+
+method_service() {
+	local action
+	action="$(arg_get action)"
+	[ -x "$INIT" ] || { json_reply_error "KixDNS init script not found"; return; }
+	case "$action" in
+		start|stop|restart|enable|disable)
+			"$INIT" "$action" >/dev/null 2>&1 || true
+			[ "$action" = "restart" ] || [ "$action" = "start" ] || sleep 1
+			json_reply_ok "Service action completed: $action"
+			;;
+		*) json_reply_error "Unsupported service action" ;;
+	esac
+}
+
+method_get_config() {
+	local content last
+	content="$(cat "$CFG" 2>/dev/null)"
+	last="$(latest_backup)"
+	json_init
+	json_add_boolean ok 1
+	json_add_string path "$CFG"
+	json_add_string content "$content"
+	json_add_string last_backup "$last"
+	json_add_string version "$($BIN --version 2>/dev/null | head -1)"
+	editor_status_json
+	json_dump
+}
+
+method_save_config() {
+	local content rc
+	content="$(arg_get content)"
+	prepare_config_tmp "$content"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		json_reply_error "Configuration validation failed (code $rc)"
+		return
+	fi
+	install_prepared_config "$PREPARED_TMP"
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		json_init
+		json_add_boolean ok 1
+		json_add_string message "Configuration saved. KixDNS apply was not requested."
+		json_add_string backup "$BACKUP_CREATED"
+		json_dump
+	else
+		rm -f "$PREPARED_TMP" 2>/dev/null || true
+		json_reply_error "Configuration save failed (code $rc)"
+	fi
+}
+
+method_apply_config() {
+	local content rc backup mode reasons before_pid
+	content="$(arg_get content)"
+	prepare_config_tmp "$content"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		json_reply_error "Configuration JSON validation failed (code $rc)"
+		return
+	fi
+
+	reasons=""
+	if [ -s "$CFG" ]; then
+		reasons="$(restart_field_changes "$CFG" "$PREPARED_TMP")"
+	else
+		reasons="initial configuration"
+	fi
+	if [ -n "$reasons" ]; then mode="restart"; else mode="hot_reload"; fi
+	before_pid="$(kix_pid)"
+
+	install_prepared_config "$PREPARED_TMP"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		rm -f "$PREPARED_TMP" 2>/dev/null || true
+		json_reply_error "Configuration save failed (code $rc)"
+		return
+	fi
+	backup="$BACKUP_CREATED"
+
+	if [ "$mode" = "restart" ]; then
+		restart_and_verify
+		rc=$?
+	else
+		hot_reload_and_verify "$before_pid"
+		rc=$?
+	fi
+
+	if [ "$rc" -eq 0 ]; then
+		json_init
+		json_add_boolean ok 1
+		json_add_string apply_mode "$mode"
+		json_add_string restart_fields "$reasons"
+		json_add_string message "$([ "$mode" = "restart" ] && echo 'Configuration applied with service restart and health verification' || echo 'Configuration applied by KixDNS hot reload and health verification')"
+		json_add_string backup "$backup"
+		json_dump
+		return
+	fi
+
+	if [ -n "$backup" ] && rollback_to "$backup"; then
+		json_init
+		json_add_boolean ok 0
+		json_add_boolean rolled_back 1
+		json_add_string apply_mode "$mode"
+		json_add_string error "KixDNS failed health verification after apply (code $rc); previous configuration restored and service restarted"
+		json_add_string backup "$backup"
+		json_dump
+	else
+		json_init
+		json_add_boolean ok 0
+		json_add_boolean rolled_back 0
+		json_add_string apply_mode "$mode"
+		json_add_string error "KixDNS failed health verification after apply (code $rc) and automatic rollback failed"
+		json_add_string backup "$backup"
+		json_dump
+	fi
+}
+
+method_restore_last() {
+	local backup
+	backup="$(latest_backup)"
+	[ -n "$backup" ] || { json_reply_error "No backup is available"; return; }
+	if rollback_to "$backup"; then
+		json_init
+		json_add_boolean ok 1
+		json_add_string message "Last backup restored and KixDNS restarted"
+		json_add_string backup "$backup"
+		json_dump
+	else
+		json_reply_error "Failed to restore the last backup"
+	fi
+}
+
+method_list_backups() {
+	local file name size stamp count=0
+	json_init
+	json_add_boolean ok 1
+	json_add_array backups
+	for file in $(ls -1t "$BACKUP_DIR"/pipeline.json.*.bak 2>/dev/null | head -30); do
+		[ -f "$file" ] || continue
+		name="${file##*/}"
+		size="$(wc -c < "$file")"
+		stamp="${name#pipeline.json.}"
+		stamp="${stamp%.bak}"
+		json_add_object ""
+		json_add_string name "$name"
+		json_add_string stamp "$stamp"
+		json_add_int size "${size:-0}"
+		json_close_object
+		count=$((count+1))
+	done
+	json_close_array
+	json_add_int count "$count"
+	json_dump
+}
+
+method_restore_backup() {
+	local name backup
+	name="$(arg_get name)"
+	case "$na
