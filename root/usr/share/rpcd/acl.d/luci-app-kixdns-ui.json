@@ -23,7 +23,8 @@
           "apply_config",
           "restore_last",
           "restore_backup",
-          "sync_editor"
+          "sync_editor",
+          "clear_log"
         ]
       }
     }
