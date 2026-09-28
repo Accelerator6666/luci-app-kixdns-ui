@@ -1,37 +1,46 @@
 'use strict';
 'require view';
-'require rpc';
 'require ui';
+'require kixdns.common as kix';
 
-var callDiagnose = rpc.declare({ object: 'luci.kixdns', method: 'diagnose', params: [ 'domain', 'qtype' ], expect: {} });
-var callSelfCheck = rpc.declare({ object: 'luci.kixdns', method: 'self_check', expect: {} });
-var callGetLog = rpc.declare({ object: 'luci.kixdns', method: 'get_log', params: [ 'limit' ], expect: {} });
+function renderChecks(items) {
+	if (!items.length)
+		return E('div', { 'class': 'alert-message notice' }, _('No structured check results were returned.'));
+
+	return E('div', { 'class': 'table' }, items.map(function(item) {
+		var good = item.state === 'PASS';
+		var neutral = item.state === 'WARN';
+		return E('div', { 'class': 'tr' }, [
+			E('div', { 'class': 'td left', 'style': 'width:110px' }, kix.badge(item.state, good, neutral)),
+			E('div', { 'class': 'td left' }, item.text)
+		]);
+	}));
+}
 
 return view.extend({
-	load: function() { return callGetLog(120); },
 	query: function() {
 		var domain = document.getElementById('diag-domain').value.trim();
 		var qtype = document.getElementById('diag-qtype').value;
 		var out = document.getElementById('diag-output');
 		out.textContent = _('Running DNS query…');
-		return callDiagnose(domain, qtype).then(function(res) {
+		return kix.callDiagnose(domain, qtype).then(function(res) {
 			out.textContent = (res && res.output) || (res && res.error) || _('No output');
 			if (res && res.server) out.textContent = 'Server: ' + res.server + '\n\n' + out.textContent;
-			if (!res || !res.ok) ui.addNotification(null, E('p', {}, (res && res.error) || _('DNS query failed.')), 'error');
+			if (!res || !res.ok) kix.notify((res && res.error) || _('DNS query failed.'), 'error');
 		});
 	},
+
 	check: function() {
 		var out = document.getElementById('check-output');
 		out.textContent = _('Running self-check…');
-		return callSelfCheck().then(function(res) {
-			out.textContent = (res && res.report) || (res && res.error) || _('No output');
-			ui.addNotification(null, E('p', {}, res && res.ok ? _('Core KixDNS self-check passed.') : _('Core KixDNS self-check reported a failure.')), res && res.ok ? 'info' : 'error');
+		return kix.callSelfCheck().then(function(res) {
+			var items = kix.parseSelfCheck(res && res.report);
+			out.replaceChildren(renderChecks(items));
+			kix.notify(res && res.ok ? _('Core KixDNS self-check passed.') : _('Core KixDNS self-check reported a failure.'), res && res.ok ? 'info' : 'error');
 		});
 	},
-	refresh: function() {
-		return callGetLog(250).then(function(res) { document.getElementById('log-output').textContent = (res && res.output) || _('No KixDNS log entries found.'); });
-	},
-	render: function(data) {
+
+	render: function() {
 		return E([], [
 			E('h2', {}, _('KixDNS Diagnostics')),
 			E('h3', {}, _('DNS query')),
@@ -44,13 +53,11 @@ return view.extend({
 				])
 			]),
 			E('pre', { 'id': 'diag-output', 'style': 'white-space:pre-wrap;max-height:320px;overflow:auto' }, _('Query output will appear here.')),
-			E('h3', {}, _('Self-check')),
+			E('h3', {}, _('Health checks')),
 			E('p', {}, E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, this.check) }, _('Run self-check'))),
-			E('pre', { 'id': 'check-output', 'style': 'white-space:pre-wrap;max-height:520px;overflow:auto' }, _('Self-check output will appear here.')),
-			E('h3', {}, _('Recent log')),
-			E('p', {}, E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, this.refresh) }, _('Refresh log'))),
-			E('pre', { 'id': 'log-output', 'style': 'white-space:pre-wrap;max-height:420px;overflow:auto' }, (data && data.output) || _('No KixDNS log entries found.'))
+			E('div', { 'id': 'check-output' }, E('div', { 'class': 'alert-message notice' }, _('Run the self-check to see structured health results.')))
 		]);
 	},
+
 	handleSaveApply: null, handleSave: null, handleReset: null
 });
