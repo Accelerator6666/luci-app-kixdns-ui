@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 - 2026-09-28
+
+- Added shared LuCI RPC/UI helpers in `kixdns/common.js`.
+- Reworked Overview into a live dashboard with 5-second polling, process memory and listener-health state.
+- Reworked Diagnostics to render PASS/FAIL/WARN checks as structured status rows.
+- Added a dedicated live Logs page with line-count selection, auto refresh, pause/resume and controlled log clearing.
+- Added `clear_log` rpcd method and corresponding least-privilege ACL entry.
+- Updated GitHub Actions checkout to v7 and expanded JavaScript syntax checks to shared resource files.
+- Preserved the existing safe-apply, hot-reload/restart classification, health verification and rollback behavior.
+
 ## 0.2.0 - 2026-09-26
 
 - Reworked the project around the upstream KixDNS visual config editor instead of maintaining a parallel Pipeline form implementation.
