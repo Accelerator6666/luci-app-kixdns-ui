@@ -4,9 +4,9 @@ LuCI management UI for an existing [KixDNS](https://github.com/olicesx/kixdns) i
 
 This project is intentionally **non-invasive**: it manages KixDNS itself and `/etc/kixdns/pipeline.json`; it does not automatically rewrite dnsmasq, nftables/firewall rules, dae routing, DHCP, or DNS hijacking.
 
-## v0.2.0 scope
+## v0.3.0 scope
 
-- Overview: service state, PID, version, listener addresses, config validity and official-editor status.
+- Live Overview: service state, PID, memory usage, version, listener health, listener addresses, config validity and official-editor status; refreshes every 5 seconds.
 - Official Visual Editor bridge: fetches `tools/config_editor.html` directly from the upstream KixDNS repository on demand, serves it locally, auto-loads the router's current `pipeline.json`, and can save/apply the resulting JSON back through rpcd.
 - Safe apply engine:
   - creates a timestamped backup before every write;
@@ -16,7 +16,9 @@ This project is intentionally **non-invasive**: it manages KixDNS itself and `/e
   - restores the previous config and restarts KixDNS if verification fails.
 - Raw JSON editor as an advanced escape hatch.
 - Backup history, diff and restore.
-- DNS diagnostics, GeoIP/GeoSite file checks, log viewer, and optional integration with `/usr/bin/dae-kixdns-check` when that script already exists.
+- Structured DNS diagnostics with PASS/FAIL/WARN health rows, GeoIP/GeoSite file checks, and optional integration with `/usr/bin/dae-kixdns-check` when that script already exists.
+- Dedicated live Logs page with 50/100/250/500-line views, pause/resume, refresh, and controlled log clearing.
+- Shared LuCI RPC/UI helper module under `htdocs/luci-static/resources/kixdns/common.js` to reduce duplicated page logic.
 
 ## Why the official editor is fetched instead of bundled
 
@@ -37,7 +39,7 @@ The upstream editor loads Vue 3, Bootstrap 5 and Mermaid from public CDNs, so th
 
 Current upstream KixDNS documentation states that valid JSON changes are watched and hot-reloaded. It also states that listener addresses, UDP worker count, TLS DoH listener, connection-pool construction, cache construction and other engine-initialization parameters are created at startup and require a service restart when changed.
 
-v0.2.0 therefore uses a conservative restart classifier. Changes to fields such as listener/TLS paths, pool sizing, connection lifecycle settings, flow-control construction, cache construction, `dashmap_shards`, and `geoip_db_path` trigger a restart. Ordinary Pipeline/rule/upstream changes use hot reload.
+v0.3.0 continues to use a conservative restart classifier. Changes to fields such as listener/TLS paths, pool sizing, connection lifecycle settings, flow-control construction, cache construction, `dashmap_shards`, and `geoip_db_path` trigger a restart. Ordinary Pipeline/rule/upstream changes use hot reload.
 
 The classifier is intentionally conservative. A restart is preferable to silently assuming a runtime field is hot-reloadable when the installed KixDNS build differs from upstream `main`.
 
@@ -97,6 +99,7 @@ Do not start by changing `bind_udp`/`bind_tcp`; those intentionally trigger a se
 /etc/kixdns/editor.meta
 /www/kixdns-editor/config_editor.html
 /usr/libexec/rpcd/luci.kixdns
+/www/luci-static/resources/kixdns/common.js
 /www/luci-static/resources/view/kixdns/
 ```
 
