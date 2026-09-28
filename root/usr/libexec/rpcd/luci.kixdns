@@ -268,7 +268,7 @@ validate_editor_file() {
 }
 
 method_status() {
-	local pid running enabled version listener last cfgvalid bindudp bindtcp
+	local pid running enabled version listener last cfgvalid bindudp bindtcp memkb listenerok
 	pid="$(kix_pid)"
 	if [ -n "$pid" ]; then running=1; else running=0; fi
 	if [ -x "$INIT" ] && "$INIT" enabled >/dev/null 2>&1; then enabled=1; else enabled=0; fi
@@ -282,18 +282,26 @@ method_status() {
 	if config_valid_file "$CFG"; then cfgvalid=1; else cfgvalid=0; fi
 	bindudp="$(config_bind_udp)"
 	bindtcp="$(config_bind_tcp)"
+	memkb=0
+	if [ -n "$pid" ] && [ -r "/proc/$pid/status" ]; then
+		memkb="$(awk '/^VmRSS:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null)"
+		case "$memkb" in ''|*[!0-9]*) memkb=0 ;; esac
+	fi
+	if listener_ok; then listenerok=1; else listenerok=0; fi
 
 	json_init
 	json_add_boolean ok 1
 	json_add_boolean running "$running"
 	json_add_boolean enabled "$enabled"
 	json_add_int pid "${pid:-0}"
+	json_add_int memory_kb "${memkb:-0}"
 	json_add_string version "$version"
 	json_add_string config_path "$CFG"
 	json_add_boolean config_valid "$cfgvalid"
 	json_add_string bind_udp "$bindudp"
 	json_add_string bind_tcp "$bindtcp"
 	json_add_string listener "$listener"
+	json_add_boolean listener_ok "$listenerok"
 	json_add_string last_backup "$last"
 	json_add_boolean binary_exists "$([ -x "$BIN" ] && echo 1 || echo 0)"
 	editor_status_json
@@ -624,6 +632,13 @@ method_get_log() {
 	json_dump
 }
 
+method_clear_log() {
+	if [ -e "$LOG" ]; then
+		: > "$LOG" 2>/dev/null || { json_reply_error "Unable to clear KixDNS log"; return; }
+	fi
+	json_reply_ok "KixDNS log cleared"
+}
+
 case "$1" in
 	list)
 		cat <<'JSON'
@@ -641,7 +656,8 @@ case "$1" in
   "editor_status": {},
   "diagnose": { "domain": "", "qtype": "A" },
   "self_check": {},
-  "get_log": { "limit": 120 }
+  "get_log": { "limit": 120 },
+  "clear_log": {}
 }
 JSON
 		;;
@@ -662,6 +678,7 @@ JSON
 			diagnose) method_diagnose ;;
 			self_check) method_self_check ;;
 			get_log) method_get_log ;;
+			clear_log) method_clear_log ;;
 			*) json_reply_error "Unknown method" ;;
 		esac
 		;;
